@@ -4,9 +4,16 @@
 # Nix keys override; user-added keys (skills, streaming, etc.) are preserved.
 { pkgs }:
 pkgs.writeScript "hermes-config-merge" ''
-  #!${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3
-  import json, os, stat, sys, tempfile, yaml
+  #!${pkgs.python3.withPackages (ps: [ ps.ruamel-yaml ])}/bin/python3
+  import json, os, stat, sys, tempfile
   from pathlib import Path
+  from ruamel.yaml import YAML
+
+  yaml = YAML(typ="safe", pure=True)
+  # Existing configs use YAML 1.1 booleans such as yes and off.
+  yaml.version = (1, 1)
+  yaml.default_flow_style = False
+  yaml.sort_base_mapping_type_on_output = False
 
   nix_json, config_path = sys.argv[1], Path(sys.argv[2])
   requested_mode = int(sys.argv[3], 8) if len(sys.argv) > 3 else None
@@ -26,7 +33,7 @@ pkgs.writeScript "hermes-config-merge" ''
   existing = {}
   if existing_stat is not None:
       with open(target_path) as f:
-          existing = yaml.safe_load(f) or {}
+          existing = yaml.load(f) or {}
 
   def deep_merge(base, override):
       result = dict(base)
@@ -59,7 +66,7 @@ pkgs.writeScript "hermes-config-merge" ''
   fd, temporary = tempfile.mkstemp(dir=target_path.parent, prefix=".hermes-config.")
   try:
       with os.fdopen(fd, "w") as f:
-          yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
+          yaml.dump(merged, f)
           f.flush()
           os.fsync(f.fileno())
           if final_owner is not None:
