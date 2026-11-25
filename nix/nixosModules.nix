@@ -424,6 +424,35 @@
       # — does not pay for a bus that will never arrive.
       lingerEnabled = ((config.users.users.${cfg.user} or { }).linger or false) == true;
 
+      # Every gateway unit runs as cfg.user and dispatches cron the same way,
+      # so the default gateway and each named-profile gateway share this.
+      gatewayUserBusWiring = unitName: {
+        # linger-users.service is the unit that runs `loginctl
+        # enable-linger` for a declared `users.users.<name>.linger`.
+        after = [ "network-online.target" ] ++ lib.optional lingerEnabled "linger-users.service";
+        wants = [ "network-online.target" ] ++ lib.optional lingerEnabled "linger-users.service";
+
+        # Wait for the user bus that `systemd-run --user --scope` connects
+        # to. Ordering after linger-users.service is not enough on its own:
+        # `loginctl enable-linger` returns before logind has finished
+        # starting user@<uid>.service, and run_gateway() resolves
+        # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS exactly once at
+        # startup — so a bus that appears after ExecStart is a bus this
+        # process never sees, for its whole lifetime.
+        #
+        # Bounded and non-fatal: a gateway without cron beats no gateway.
+        preStart = lib.mkIf lingerEnabled ''
+          for _ in $(seq 1 50); do
+            [ -S "/run/user/$(id -u)/bus" ] && break
+            sleep 0.2
+          done
+          if [ ! -S "/run/user/$(id -u)/bus" ]; then
+            echo "${unitName}: no user bus at /run/user/$(id -u)/bus after 10s;" \
+                 "restart-safe cron dispatch will fail for the life of this process" >&2
+          fi
+        '';
+      };
+
     in
     {
       options.services.hermes-agent =
@@ -792,44 +821,14 @@
           # MODE A: Native systemd service (default)
           # ══════════════════════════════════════════════════════════════════
           (lib.mkIf (!cfg.container.enable) {
-            systemd.services.hermes-agent = {
+            systemd.services.hermes-agent = gatewayUserBusWiring "hermes-agent" // {
               description = "Hermes Agent Gateway";
               wantedBy = [ "multi-user.target" ];
-              # linger-users.service is the unit that runs `loginctl
-              # enable-linger` for a declared `users.users.<name>.linger`.
-              after = [
-                "network-online.target"
-              ]
-              ++ lib.optional lingerEnabled "linger-users.service";
-              wants = [
-                "network-online.target"
-              ]
-              ++ lib.optional lingerEnabled "linger-users.service";
 
               # cfg.environment and cfg.environmentFiles are written to
               # $HERMES_HOME/.env by the activation script. load_hermes_dotenv()
               # reads them at Python startup — no systemd EnvironmentFile needed.
               environment = commonUnitEnvironment;
-
-              # Wait for the user bus that `systemd-run --user --scope` connects
-              # to. Ordering after linger-users.service is not enough on its own:
-              # `loginctl enable-linger` returns before logind has finished
-              # starting user@<uid>.service, and run_gateway() resolves
-              # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS exactly once at
-              # startup — so a bus that appears after ExecStart is a bus this
-              # process never sees, for its whole lifetime.
-              #
-              # Bounded and non-fatal: a gateway without cron beats no gateway.
-              preStart = lib.mkIf lingerEnabled ''
-                for _ in $(seq 1 50); do
-                  [ -S "/run/user/$(id -u)/bus" ] && break
-                  sleep 0.2
-                done
-                if [ ! -S "/run/user/$(id -u)/bus" ]; then
-                  echo "hermes-agent: no user bus at /run/user/$(id -u)/bus after 10s;" \
-                       "restart-safe cron dispatch will fail for the life of this process" >&2
-                fi
-              '';
 
               serviceConfig = commonServiceConfig // {
                 ExecStart = lib.escapeShellArgs (common.gatewayArgv cfg);
@@ -845,11 +844,9 @@
               let
                 agentCfg = profileCfg profile;
               in
-              lib.nameValuePair "hermes-agent-${name}" {
+              lib.nameValuePair "hermes-agent-${name}" (gatewayUserBusWiring "hermes-agent-${name}" // {
                 description = "Hermes Agent Gateway (${name} profile)";
                 wantedBy = [ "multi-user.target" ];
-                after = [ "network-online.target" ];
-                wants = [ "network-online.target" ];
 
                 environment = {
                   HOME = cfg.stateDir;
@@ -871,7 +868,7 @@
                   inherit pkgs;
                   cfg = agentCfg;
                 };
-              }
+              })
             ) (lib.filterAttrs (_name: profile: profile.gateway.enable) cfg.profiles);
           })
 

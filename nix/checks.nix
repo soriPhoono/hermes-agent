@@ -1354,13 +1354,22 @@ if mismatches:
           let
             configOf = settings: (evalNixosModule ({ enable = true; } // settings)).config;
 
-            managed = configOf { };
+            managed = configOf { profiles.coder.gateway.enable = true; };
             gateway = managed.systemd.services.hermes-agent;
             gatewayUser = gateway.serviceConfig.User;
+            # A named-profile gateway runs as the same uid and dispatches cron
+            # the same way, so it needs the same ordering and bus wait.
+            profileGateway = managed.systemd.services.hermes-agent-coder;
 
             # The operator declares the user themselves. Nothing here knows
             # whether they lingered it, so nothing may assume a bus.
-            unmanaged = (configOf { createUser = false; }).systemd.services.hermes-agent;
+            unmanagedServices =
+              (configOf {
+                createUser = false;
+                profiles.coder.gateway.enable = true;
+              }).systemd.services;
+            unmanaged = unmanagedServices.hermes-agent;
+            unmanagedProfile = unmanagedServices.hermes-agent-coder;
 
             failures =
               lib.optional (!((managed.users.users.${gatewayUser}.linger or false) == true))
@@ -1370,7 +1379,13 @@ if mismatches:
               ++ lib.optional (!lib.hasInfix "/run/user" gateway.preStart)
                 "a lingering gateway must wait for its user bus before ExecStart: the bus environment is resolved once at startup, so a bus that appears later is one this process never sees"
               ++ lib.optional (lib.hasInfix "/run/user" unmanaged.preStart)
-                "a gateway whose uid is not known to linger must not block on a user bus that may never arrive";
+                "a gateway whose uid is not known to linger must not block on a user bus that may never arrive"
+              ++ lib.optional (!lib.elem "linger-users.service" profileGateway.after)
+                "a lingering named-profile gateway must be ordered after linger-users.service"
+              ++ lib.optional (!lib.hasInfix "/run/user" profileGateway.preStart)
+                "a lingering named-profile gateway must wait for its user bus before ExecStart"
+              ++ lib.optional (lib.hasInfix "/run/user" unmanagedProfile.preStart)
+                "a named-profile gateway whose uid is not known to linger must not block on a user bus";
           in
           pkgs.runCommand "hermes-cron-worker-user-scope" { } (
             if failures != [ ] then
