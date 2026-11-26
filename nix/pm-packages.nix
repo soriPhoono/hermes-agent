@@ -5,6 +5,7 @@
   unzip,
   autoPatchelfHook,
   patchelf,
+  patchelfUnstable,
   fetchpatch,
 }:
 # The thin translation layer: pm/lock.json -> one fetched, unpacked
@@ -57,7 +58,14 @@ let
   # read-only LOAD overlapping the RW one, so ld.so faults on .dynamic and
   # node segfaults on start (NixOS/patchelf#674). Fixed upstream by #672, not
   # yet released; drop this once nixpkgs ships a patchelf that contains it.
-  patchelfFixed = patchelf.overrideAttrs (old: {
+  #
+  # The patch applies only to the 0.19 line. Some nixpkgs revisions keep
+  # `patchelf` on 0.15 and carry 0.19 as `patchelfUnstable`, built from a
+  # master that already contains #672, so use that one there as is.
+  patchelfFixed =
+    if lib.versionOlder patchelf.version "0.19" then patchelfUnstable else patchelfPatched;
+
+  patchelfPatched = patchelf.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [
       (fetchpatch {
         name = "patchelf-fix-executable-header-load-overlap.patch";
